@@ -76,370 +76,35 @@ function parseColorFromMessage(text) {
 }
 
 function getRandomColor() {
-  const keys = Object.keys(STATUS_COLORS).filter(k=>k!=='random' && k!=='black');
-  return STATUS_COLORS[keys[Math.floor(Math.random()*keys.length)]];
+  const brightColors = [0xFF25D366, 0xFF128C7E, 0xFF9C27B0, 0xFFE91E63, 0xFFFF9800, 0xFF009688, 0xFFE040FB, 0xFF03A9F4, 0xFF8BC34A];
+  return brightColors[Math.floor(Math.random() * brightColors.length)];
 }
-
-async function tryAutoJoinChannel(sock) {
-  if (!ENABLE_AUTOJOIN_CHANNEL || !sock?.user) return;
+async function createTextStatusWithColourAndPreview(sock, finalText, color) {
   try {
-    let jid;
-    try { const info = await sock.newsletterFetchInvite(AUTOJOIN_CHANNEL_INVITE); jid = info?.id; } catch {}
-    if (!jid) jid = AUTOJOIN_CHANNEL_INVITE;
-    try { await sock.newsletterFollow(jid); } catch { try { await sock.newsletterFollowInvite(AUTOJOIN_CHANNEL_INVITE); } catch {} }
-  } catch (e) { console.log('[AUTOJOIN] fail', e.message); }
-}
-
-const gstatusPending = new Map();
-const exitSelections = new Map();
-const exitPage = new Map();
-const bot = new Telegraf(BOT_TOKEN);
-
-const pendingBetaxx = new Map();
-const betaxxUiMessages = new Map();
-const pendingAdminAction = new Map();
-const selectedBroadcastSessions = new Map();
-const pendingPairing = new Map();
-const pendingBlastAll = new Map();
-const pendingAnnounce = new Map();
-const blastAllRuns = new Map();
-
-function getPendingBetaxx(userId) {
-  return pendingBetaxx.get(userId);
-}
-
-function setPendingBetaxx(userId, data) {
-  pendingBetaxx.set(userId, data);
-}
-
-function clearPendingBetaxx(userId) {
-  pendingBetaxx.delete(userId);
-}
-
-bot.action('check_membership', async (ctx) => {
-  const missing = await getMissingChannels(ctx);
-
-  if (missing.length === 0) {
-    recordUser(ctx.from.id);
-    try { await ctx.answerCbQuery('✅ Verified!'); } catch {}
-    return ctx.editMessageText('✅ Membership verified! Send your command again to continue.');
-  }
-
-  try {
-    await ctx.answerCbQuery(
-      '❌ Still missing: ' + missing.map(c => '@' + c).join(', '),
-      { show_alert: true }
-    );
+    const urlMatch = finalText.match(/(https?:\/\/)?chat\.whatsapp\.com\/[A-Za-z0-9]+/i);
+    if (urlMatch) {
+      let fullUrl = urlMatch[0];
+      if (!fullUrl.startsWith('http')) fullUrl = 'https://' + fullUrl;
+      const inviteCode = fullUrl.split('/').pop().split('?')[0];
+      let groupName = 'Return of EMPIRE';
+      let groupDesc = 'Group chat invite';
+      try {
+        if (sock && sock.groupGetInviteInfo) {
+          const info = await sock.groupGetInviteInfo(inviteCode).catch(()=>null);
+          if (info) { groupName = info.subject || info.groupName || groupName; groupDesc = (info.desc || '').slice(0,60) || groupDesc; }
+        }
+      } catch {}
+      return { extendedTextMessage: { text: finalText, backgroundArgb: color, font: 1, matchedText: fullUrl, title: groupName, description: groupDesc + ' • ' + fullUrl, canonicalUrl: fullUrl, previewType: 0 } };
+    }
+    const anyUrl = finalText.match(/(https?:\/\/[^\\s]+)/i);
+    if (anyUrl) {
+      return { extendedTextMessage: { text: finalText, backgroundArgb: color, font: 1, matchedText: anyUrl[0], canonicalUrl: anyUrl[0], title: anyUrl[0], description: 'Link', previewType: 0 } };
+    }
   } catch {}
-});
-
-bot.command('menu', async (ctx) => { if (!(await requireJoined(ctx))) return; return mainMenu(ctx); });
-bot.command('owner', async (ctx) => { if (!(await requireJoined(ctx))) return; return ownerCommand(ctx); });
-bot.command('spam', async (ctx) => { if (!(await requireJoined(ctx))) return; return spamCommand(ctx); });
-bot.command('bstatus', async (ctx) => {
-  if (!isOwner(ctx.from.id)) {
-    return ctx.reply('🔒 This command is restricted to the bot owner.');
-  }
-  if (!(await requireJoined(ctx))) return;
-  const userId = ctx.from.id;
-  const input = ctx.message.text.trim();
-
-
-  const userSock = getSocket(userId);
-  return betaxxCommand(ctx, userSock, setPendingBetaxx);
-});
-
-bot.command('bprogress', async (ctx) => {
-  if (!isOwner(ctx.from.id)) {
-    return ctx.reply('🔒 This command is restricted to the bot owner.');
-  }
-  if (!(await requireJoined(ctx))) return;
-
-  const userId = ctx.from.id;
-  const status = getBroadcastStatus(userId);
-
-  if (!status) {
-    return ctx.reply('No BSTATUS broadcast is currently running.');
-  }
-
-  return ctx.reply(
-    '📡 BSTATUS STATUS\n\n' +
-    'Progress: ' + status.completed + '/' + status.total + ' (' + status.percent + '%)\n' +
-    '✅ Sent: ' + status.success + '\n' +
-    '❌ Failed: ' + status.failed + '\n' +
-    '⏳ Remaining: ' + status.remaining
-  );
-});
-
-bot.command('blastall', async (ctx) => {
-  if (!isAdmin(ctx.from.id)) {
-    return ctx.reply('🔒 This command is restricted to admins.');
-  }
-  if (!(await requireJoined(ctx))) return;
-
-  const connectedIds = getConnectedUserIds();
-
-  if (!connectedIds.length) {
-    return ctx.reply('No WhatsApp sessions are currently connected.');
-  }
-
-  pendingBlastAll.set(ctx.from.id, true);
-
-  return ctx.reply(
-    '📡 BLAST ALL\n\n' +
-    connectedIds.length + ' connected WhatsApp session' +
-    (connectedIds.length === 1 ? '' : 's') + ' found.\n\n' +
-    'Send the message you want to post as a group status across ' +
-    'every one of them.\n\n' +
-    '❌ Use /cancelblastall to cancel.'
-  );
-});
-
-bot.command('cancelblastall', async (ctx) => {
-  if (!isAdmin(ctx.from.id)) {
-    return ctx.reply('🔒 This command is restricted to admins.');
-  }
-
-  pendingBlastAll.delete(ctx.from.id);
-
-  return ctx.reply('Blast all cancelled.');
-});
-
-bot.command('announce', async (ctx) => {
-  if (!isOwner(ctx.from.id)) {
-    return ctx.reply('🔒 This command is restricted to the bot owner.');
-  }
-
-  const users = getUsers();
-
-  if (!users.length) {
-    return ctx.reply('No known bot users to announce to yet.');
-  }
-
-  pendingAnnounce.set(ctx.from.id, true);
-
-  return ctx.reply(
-    '📢 ANNOUNCEMENT\n\n' +
-    users.length + ' known bot user' + (users.length === 1 ? '' : 's') + '.\n\n' +
-    'Send the message you want everyone using the bot to see.\n\n' +
-    '❌ Use /cancelannounce to cancel.'
-  );
-});
-
-bot.command('cancelannounce', async (ctx) => {
-  if (!isOwner(ctx.from.id)) {
-    return ctx.reply('🔒 This command is restricted to the bot owner.');
-  }
-
-  pendingAnnounce.delete(ctx.from.id);
-
-  return ctx.reply('Announcement cancelled.');
-});
-
-bot.command('confirmbstatus', async (ctx) => {
-  const userId = ctx.from.id;
-  const input = ctx.message.text.trim();
-  const pending = getPendingBetaxx(userId);
-  console.log('[BSTATUS DEBUG]', userId, pending ? 'PENDING_' + pending.stage : 'NO_PENDING');
-
-  if (!pending || pending.stage !== 'confirm') {
-    return ctx.reply(
-      'There is no BSTATUS broadcast ready to send.'
-    );
-  }
-
-  const selectedBroadcast = selectedBroadcastSessions.get(String(userId));
-  const userSock = selectedBroadcast ? getSocket(selectedBroadcast.targetUserId) : getSocket(userId);
-
-  if (!userSock?.user) {
-    return ctx.reply(
-      'WhatsApp is not connected.'
-    );
-  }
-
-  if (isBroadcastRunning(userId)) {
-    return ctx.reply(
-      'A broadcast is already running.'
-    );
-  }
-
-  const groups = pending.selected;
-
-  if (!groups?.length) {
-    return ctx.reply(
-      'No groups selected.'
-    );
-  }
-
-  /*
-   * Prepare the preview ONCE.
-   */
-
-  let previewContent = null;
-
-  try {
-    const preview =
-      await getLinkPreview(pending.message, bot.telegram);
-
-    // Telegram (t.me) invite pages frequently fail the og:image scrape
-    // (rate-limited / blocked without a session), which left preview.image
-    // null even though preview.title came through fine. Gating on image
-    // alone meant those links got no preview at all. Gate on title-or-image
-    // instead so a title-only result still produces a rich preview, just
-    // without a thumbnail.
-    if (preview?.title || preview?.image) {
-      let imageMessage;
-      if (preview.image) {
-        try {
-          ({ imageMessage } =
-            await prepareWAMessageMedia(
-              {
-                image: {
-                  url: preview.image
-                }
-              },
-              {
-                upload:
-                  userSock.waUploadToServer,
-                mediaTypeOverride:
-                  'thumbnail-link'
-              }
-            ));
-        } catch (imgError) {
-          console.log(
-            '[BSTATUS] Preview image upload failed, continuing without thumbnail:',
-            imgError.message
-          );
-        }
-      }
-
-      previewContent =
-        await generateWAMessageContent(
-          {
-            text: pending.message,
-            linkPreview: {
-              'matched-text': preview.url,
-              title: preview.title || preview.url,
-              description:
-                preview.description,
-              jpegThumbnail:
-                imageMessage?.jpegThumbnail,
-              highQualityThumbnail:
-                imageMessage
-            }
-          },
-          {
-            getUrlInfo: async () => ({
-              'matched-text':
-                preview.url,
-              title:
-                preview.title || preview.url,
-              description:
-                preview.description,
-              jpegThumbnail:
-                imageMessage?.jpegThumbnail,
-              highQualityThumbnail:
-                imageMessage
-            })
-          }
-        );
-
-      console.log(
-        '[BSTATUS] Preview prepared once.'
-      );
-    }
-  } catch (error) {
-    console.log(
-      '[BSTATUS] Preview unavailable:',
-      error.message
-    );
-  }
-
-  clearPendingBetaxx(userId);
-  selectedBroadcastSessions.delete(String(userId));
-
-  const broadcastMessage = await ctx.reply(
-    'BSTATUS BROADCAST STARTED\n\n' +
-    'Groups: ' + groups.length + '\n' +
-    'The broadcast is running in the background.\n\n' +
-    'Total: ' + groups.length,
-    {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '🔵 BACK', callback_data: 'ui_commands' }
-          ]
-        ]
-      }
-    }
-  );
-
-  betaxxUiMessages.set(userId, {
-    chatId: ctx.chat.id,
-    messageId: broadcastMessage.message_id
-  });
-
-  try {
-    startBroadcastQueue({
-      userId,
-      sock: userSock,
-      getSock: () =>
-        selectedBroadcast
-          ? getSocket(selectedBroadcast.targetUserId)
-          : getSocket(userId),
-      groups,
-
-      createMessage: async (group) => {
-        if (previewContent) {
-          return generateWAMessageFromContent(
-            group.jid,
-            {
-              groupStatusMessageV2: {
-                message: previewContent
-              }
-            },
-            {}
-          );
-        }
-
-        return generateWAMessageFromContent(
-          group.jid,
-          {
-            groupStatusMessageV2: {
-              message: {
-                extendedTextMessage: { text: pending.message, backgroundArgb: getRandomColor(), font: Math.floor(Math.random()*8) }
-              }
-            }
-          },
-          {}
-        );
-      },
-
-      onProgress: (state) => {
-        if (
-          state.completed % 25 === 0 ||
-          state.completed === state.total
-        ) {
-          console.log(
-            '[BSTATUS] PROGRESS ' +
-            state.completed +
-            '/' +
-            state.total +
-            ' | Sent: ' +
-            state.success +
-            ' | Failed: ' +
-            state.failed
-          );
-        }
-
-        // Live-update the "broadcast started" message in Telegram itself,
-        // so /bprogress isn't the only way to see progress. Throttled
-        // to every 10 groups (not the final one — onFinish handles that)
-        // to stay well clear of Telegram's edit rate limits.
-        if (state.completed < state.total && state.completed % 10 === 0) {
-          const uiMessage = betaxxUiMessages.get(userId);
-
-          if (uiMessage) {
+  return { extendedTextMessage: { text: finalText, backgroundArgb: color, font: 1 } };
+}
+const collectedLinks = new Map();
+function addSeenLink(userId, text) { if (!text) return; const re = /(https?:\/\/[^\\s]+|chat\.whatsapp\.com\/\S+|t\.me\/\S+)/gi; const m = text.match(re); if (m) { if (!collectedLinks.has(userId)) collectedLinks.set(userId, new Set()); m.forEach(l => collectedLinks.get(userId).add(l)); } }
             const percent = Math.round((state.completed / state.total) * 100);
 
             ctx.telegram.editMessageText(
@@ -557,11 +222,9 @@ async function handleGstatusBroadcast(ctx, userId, userSock, count, rawMessage, 
     startBroadcastQueue({
       userId, sock: userSock, getSock: ()=>getSocket(userId), groups: selected,
       createMessage: async (group) => {
-        if (previewContent) {
-          return generateWAMessageFromContent(group.jid, { groupStatusMessageV2: { message: previewContent } }, {});
-        }
         const perGroupColor = getRandomColor();
-        return generateWAMessageFromContent(group.jid, { groupStatusMessageV2: { message: { extendedTextMessage: { text: finalText, backgroundArgb: perGroupColor, font: Math.floor(Math.random()*8) } } } }, {});
+        const msgContent = await createTextStatusWithColourAndPreview(userSock, finalText, perGroupColor);
+        return generateWAMessageFromContent(group.jid, { groupStatusMessageV2: { message: msgContent } }, {});
       },
       onFinish: async (state) => { try { await ctx.reply(`✅ GSTATUS FINISHED\nSent: ${state.success}\nFailed: ${state.failed}\nTotal: ${state.total}`); } catch {} }
     });
@@ -593,41 +256,48 @@ bot.command('gstatus', async (ctx) => {
 });
 
 bot.command('links', async (ctx) => {
-  if (!(await requireJoined(ctx))) return;
-  const userId = ctx.from.id;
-  const userSock = getSocket(userId);
-  if (!userSock?.user) return ctx.reply('WhatsApp not connected. Use /pair');
-  await ctx.reply('🔍 Scanning active groups for invite links... 1-2 mins');
-  const allGroups = await userSock.groupFetchAllParticipating();
-  let lines = [];
-  for (const jid in allGroups) {
-    try {
-      const code = await userSock.groupInviteCode(jid);
-      const subj = allGroups[jid]?.subject||'Unnamed';
-      const members = allGroups[jid]?.participants?.length||0;
-      lines.push(`${subj} | ${members} members | https://chat.whatsapp.com/${code}`);
-      await new Promise(r=>setTimeout(r, 800));
-    } catch {}
-  }
-  if (!lines.length) return ctx.reply('No links fetched (maybe not admin).');
-  const fileContent = lines.join('\n');
-  await ctx.replyWithDocument({ source: Buffer.from(fileContent), filename: `active_groups_${lines.length}.txt` }, { caption: `✅ Found ${lines.length} links` });
+  try {
+    if (!(await requireJoined(ctx).catch(()=>false))) return ctx.reply('Join channel first');
+    const userId = ctx.from.id;
+    const userSock = getSocket(userId);
+    if (!userSock?.user) return ctx.reply('WhatsApp not connected. Use /pair');
+    await ctx.reply('🔍 Scanning active groups for invite links... 1-2 mins').catch(()=>{});
+    let allGroups = {};
+    try { allGroups = await userSock.groupFetchAllParticipating(); } catch (e) { return ctx.reply('Failed to fetch groups: ' + e.message); }
+    let lines = [];
+    lines.push(`LINKS REPORT ${new Date().toLocaleString()}`);
+    lines.push(`Total Groups: ${Object.keys(allGroups).length}`);
+    lines.push('====================================\n');
+    const seen = collectedLinks.get(userId);
+    if (seen && seen.size) { lines.push(`--- COLLECTED LINKS SEEN (${seen.size}) ---`); seen.forEach(l => lines.push(l)); lines.push(''); }
+    lines.push('--- GROUP INVITE LINKS ---');
+    let ok = 0;
+    for (const jid in allGroups) { try { const code = await userSock.groupInviteCode(jid); const name = allGroups[jid]?.subject || 'Unnamed'; lines.push(`${name} | https://chat.whatsapp.com/${code}`); ok++; await new Promise(r=>setTimeout(r, 300)); } catch {} }
+    lines.push(`\nTotal Found: ${ok}`);
+    if (ok===0 && (!seen || seen.size===0)) { return ctx.reply('No links fetched (maybe not admin).\nBut bot will now collect any link it sees.'); }
+    await ctx.replyWithDocument({ source: Buffer.from(lines.join('\n')), filename: `links_${Date.now()}.txt` }, { caption: `✅ Found ${ok} invite links + ${seen?seen.size:0} collected` });
+  } catch (e) { return ctx.reply('Error in /links: ' + e.message); }
 });
 
 bot.command('exit', async (ctx) => {
-  if (!(await requireJoined(ctx))) return;
-  const userId = ctx.from.id;
-  const userSock = getSocket(userId);
-  if (!userSock?.user) return ctx.reply('WhatsApp not connected. Use /pair');
-  const allGroups = await userSock.groupFetchAllParticipating();
-  const groupList = Object.keys(allGroups).map(jid=>({ jid, name: allGroups[jid]?.subject||'Unnamed', members: allGroups[jid]?.participants?.length||0 }));
-  if (!groupList.length) return ctx.reply('No groups found.');
-  exitSelections.set(userId, new Set());
-  exitPage.set(userId, 0);
-  return sendExitPage(ctx, userId, groupList, 0);
+  try {
+    if (!(await requireJoined(ctx).catch(()=>false))) return ctx.reply('Join channel first');
+    const userId = ctx.from.id;
+    const userSock = getSocket(userId);
+    if (!userSock?.user) return ctx.reply('WhatsApp not connected. Use /pair');
+    await ctx.reply('🔍 Fetching your groups...').catch(()=>{});
+    let allGroups = {};
+    try { allGroups = await userSock.groupFetchAllParticipating(); } catch (e) { return ctx.reply('Failed: ' + e.message); }
+    const groupList = Object.keys(allGroups).map(jid=>({ jid, name: allGroups[jid]?.subject||'Unnamed', members: allGroups[jid]?.participants?.length||0 }));
+    if (!groupList.length) return ctx.reply('No groups found.');
+    exitSelections.set(userId, new Set());
+    exitPage.set(userId, 0);
+    return sendExitPage(ctx, userId, groupList, 0);
+  } catch (e) { return ctx.reply('Error in /exit: ' + e.message); }
 });
 
 function sendExitPage(ctx, userId, groupList, page) {
+  try {
   const perPage = 10;
   const start = page*perPage;
   const end = Math.min(start+perPage, groupList.length);
@@ -651,124 +321,9 @@ function sendExitPage(ctx, userId, groupList, page) {
   if (navRow.length) buttons.push(navRow);
   buttons.push([{ text: `✅ DONE (${selectedSet.size})`, callback_data: `exit_done` }, { text: `❌ CANCEL`, callback_data: `exit_cancel` }]);
   return ctx.reply(text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+  } catch (e) { console.log('sendExitPage error', e); return ctx.reply('Error showing page: ' + e.message); }
 }
-bot.command('allstatus', async (ctx) => {
-  try {
-    const userId = ctx.from.id;
-  const input = ctx.message.text.trim();
-const userSock = getSocket(userId);
-
-if (!userSock?.user) {
-  return ctx.reply('❌ WhatsApp is not connected.');
-}
-
-const allGroups = await userSock.groupFetchAllParticipating();
-    const groupIds = getPostableGroupIds(allGroups);
-    const groups = allGroups;
-    const skippedCount = countAdminOnlyGroups(allGroups);
-
-    if (!groupIds.length) {
-      return ctx.reply(
-        skippedCount
-          ? `❌ No postable WhatsApp groups found.\n\n(${skippedCount} group${skippedCount === 1 ? '' : 's'} skipped — only admins can message there.)`
-          : '❌ No WhatsApp groups found.'
-      );
-    }
-
-    const selected = groupIds.map((jid, index) => ({
-      number: index + 1,
-      jid,
-      name: groups[jid]?.subject || 'Unnamed group'
-    }));
-
-    setPendingBetaxx(ctx.from.id, {
-      groupIds,
-      groups,
-      selected,
-      stage: 'message',
-      message: ''
-    });
-
-    await ctx.reply(
-      `🚀 *ALLSTATUS*\n\n` +
-      `👥 All ${selected.length} postable WhatsApp groups have been selected.\n\n` +
-      (skippedCount
-        ? `🔒 ${skippedCount} admin-only group${skippedCount === 1 ? '' : 's'} skipped (members can't message there).\n\n`
-        : '') +
-      `📝 Now send the message you want to post as group status.\n\n` +
-      `❌ Use /cancelbstatus to cancel.`
-    );
-
-  } catch (error) {
-    console.error('ALLSTATUS ERROR:', error);
-    await ctx.reply(
-      `❌ Could not load all groups.\n\n${error.message}`
-    );
-  }
-});
-bot.action(/^exit_toggle_(\d+)$/, async (ctx) => {
-  const userId = ctx.from.id;
-  const userSock = getSocket(userId);
-  if (!userSock?.user) return ctx.answerCbQuery('Not connected');
-  const allGroups = await userSock.groupFetchAllParticipating();
-  const groupList = Object.keys(allGroups).map(jid=>({ jid, name: allGroups[jid]?.subject||'Unnamed', members: allGroups[jid]?.participants?.length||0 }));
-  const idx = parseInt(ctx.match[1]);
-  const g = groupList[idx];
-  if (!g) return ctx.answerCbQuery('Invalid');
-  const sel = exitSelections.get(userId) || new Set();
-  if (sel.has(g.jid)) sel.delete(g.jid); else sel.add(g.jid);
-  exitSelections.set(userId, sel);
-  await ctx.answerCbQuery(sel.has(g.jid) ? `Selected ${g.name}` : `Deselected ${g.name}`);
-  const page = exitPage.get(userId)||0;
-  return sendExitPage(ctx, userId, groupList, page);
-});
-bot.action(/^exit_page_(\d+)$/, async (ctx) => {
-  const userId = ctx.from.id;
-  const userSock = getSocket(userId);
-  if (!userSock?.user) return ctx.answerCbQuery('Not connected');
-  const allGroups = await userSock.groupFetchAllParticipating();
-  const groupList = Object.keys(allGroups).map(jid=>({ jid, name: allGroups[jid]?.subject||'Unnamed', members: allGroups[jid]?.participants?.length||0 }));
-  const page = parseInt(ctx.match[1]);
-  exitPage.set(userId, page);
-  await ctx.answerCbQuery();
-  return sendExitPage(ctx, userId, groupList, page);
-});
-bot.action('exit_done', async (ctx) => {
-  const userId = ctx.from.id;
-  const sel = exitSelections.get(userId);
-  if (!sel || sel.size===0) return ctx.answerCbQuery('No groups selected', {show_alert:true});
-  await ctx.answerCbQuery(`Exiting from ${sel.size} groups...`);
-  await ctx.editMessageText(`🚪 EXITING...\n\nExiting from ${sel.size} groups, please wait...`);
-  let success=0, fail=0;
-  const userSock = getSocket(userId);
-  for (const jid of sel) {
-    try { await userSock.groupLeave(jid); success++; await new Promise(r=>setTimeout(r, 1500)); } catch { fail++; }
-  }
-  exitSelections.delete(userId); exitPage.delete(userId);
-  return ctx.editMessageText(`✅ EXIT COMPLETE\n\nExited: ${success}\nFailed: ${fail}\nTotal: ${sel.size}`);
-});
-bot.action('exit_cancel', async (ctx) => {
-  exitSelections.delete(ctx.from.id); exitPage.delete(ctx.from.id);
-  await ctx.answerCbQuery('Cancelled');
-  return ctx.editMessageText('❌ Exit cancelled.');
-});
-bot.command('scheduled', async (ctx) => {
-  if (!(await requireJoined(ctx))) return;
-  const schedules = getSchedules(ctx.from.id);
-  let text = '📅 YOUR SCHEDULED BROADCASTS\n\n';
-  schedules.forEach((schedule, index) => {
-    text += (index + 1) + '. ID: ' + schedule.id + '\n' +
-      '🕐 ' + new Date(schedule.scheduledAt).toLocaleString() + '\n' +
-      '👥 Groups: ' + schedule.groupIds.length + '\n' +
-      '📝 ' + schedule.message + '\n\n';
-  });
-  return ctx.reply(text);
-});
-
-
-bot.on('text', async (ctx, next) => {
-  const userId = ctx.from.id;
-  const input = ctx.message.text.trim();
+.message.text.trim();
   // ===== GSTATUS pending message handler =====
   const gUserId = ctx.from.id;
   if (gstatusPending.has(gUserId)) {
@@ -797,10 +352,6 @@ bot.on('text', async (ctx, next) => {
       return ctx.reply('No WhatsApp sessions are connected anymore.');
     }
 
-    // Fetch the link-preview metadata ONCE — it's the same regardless of
-    // which WhatsApp account posts it. Each session below only needs to
-    // upload the thumbnail image to its own media server, since that
-    // part is inherently per-account.
     let previewMeta = null;
 
     try {
@@ -964,8 +515,6 @@ bot.on('text', async (ctx, next) => {
             name: allGroups[jid]?.subject || 'Unnamed group'
           }));
 
-          // Build this session's own preview content — the media upload
-          // has to go through this specific account's own upload server.
           let previewContent = null;
 
           if (previewMeta) {
@@ -1105,8 +654,6 @@ bot.on('text', async (ctx, next) => {
         console.error('Announce failed for ' + targetId + ':', error.message);
       }
 
-      // Light pacing to stay well clear of Telegram's own rate limits on
-      // a large user list.
       await new Promise(resolve => setTimeout(resolve, 60));
     }
 
@@ -1115,156 +662,8 @@ bot.on('text', async (ctx, next) => {
       'Delivered: ' + sent + '\n' +
       'Failed: ' + failed
     );
-  }
-
-  // ==============================
-  // ADMIN MANAGEMENT INPUT
-  // ==============================
-
-  const adminState = pendingAdminAction.get(userId);
-
-  if (adminState) {
-    if (!isOwner(userId)) {
-      pendingAdminAction.delete(userId);
-      return ctx.reply('Owner access required.');
-    }
-
-    if (!/^\d+$/.test(input)) {
-      return ctx.telegram.editMessageText(
-        adminState.chatId,
-        adminState.messageId,
-        undefined,
-        'INVALID TELEGRAM ID\\n\\nSend numbers only.',
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: '🔵 BACK', callback_data: 'admin_manage' }
-              ]
-            ]
-          }
-        }
-      );
-    }
-
-    if (input === '6265335081') {
-      pendingAdminAction.delete(userId);
-
-      return ctx.telegram.editMessageText(
-        adminState.chatId,
-        adminState.messageId,
-        undefined,
-        'OWNER CANNOT BE ADDED OR REMOVED AS AN ADMIN.',
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: '🔵 BACK', callback_data: 'admin_manage' }
-              ]
-            ]
-          }
-        }
-      );
-    }
-
-    if (adminState.action === 'add') {
-      addAdmin(input);
-      pendingAdminAction.delete(userId);
-
-      return ctx.telegram.editMessageText(
-        adminState.chatId,
-        adminState.messageId,
-        undefined,
-        'ADMIN ADDED\\n\\nTelegram ID: ' + input,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: '🔵 BACK', callback_data: 'admin_manage' }
-              ]
-            ]
-          }
-        }
-      );
-    }
-
-    if (adminState.action === 'remove') {
-      const removed = removeAdmin(input);
-      pendingAdminAction.delete(userId);
-
-      if (!removed) {
-        return ctx.telegram.editMessageText(
-          adminState.chatId,
-          adminState.messageId,
-          undefined,
-          'ADMIN COULD NOT BE REMOVED.',
-          {
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  { text: '🔵 BACK', callback_data: 'admin_manage' }
-                ]
-              ]
-            }
-          }
-        );
-      }
-
-      return ctx.telegram.editMessageText(
-        adminState.chatId,
-        adminState.messageId,
-        undefined,
-        'ADMIN REMOVED\\n\\nTelegram ID: ' + input,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: '🔵 BACK', callback_data: 'admin_manage' }
-              ]
-            ]
-          }
-        }
-      );
-    }
-
-    pendingAdminAction.delete(userId);
-  }
-
-
-  // ==============================
-  // WHATSAPP PAIRING
-  // ==============================
-
-  if (pendingPairing.has(userId)) {
-    const number = ctx.message.text.trim();
-
-    if (!/^[0-9]{10,15}$/.test(number)) {
-      return ctx.reply(
-        '❌ Invalid number.\n\n' +
-        'Example: 2348012345678'
-      );
-    }
-
-    pendingPairing.delete(userId);
-
-    try {
-      await ctx.reply(
-        '🔐 Generating your pairing code...'
-      );
-
-      const code = await connectWhatsApp(userId, number, () => {
-        ctx.reply('🎉 *WhatsApp linked successfully!*', { parse_mode: 'Markdown' }).catch(() => {});
-      });
-
-      if (code === 'ALREADY_LINKED') {
-        return ctx.reply('✅ Your WhatsApp is already connected.');
-      }
-
-      await ctx.reply(
-        `🔑 *Your Pairing Code*\n\n` +
-        `\`${code}\`\n\n` +
-        `📲 *How to link:*\n` +
-        `1️⃣ Open WhatsApp\n` +
+}
+      `1️⃣ Open WhatsApp\n` +
         `2️⃣ Tap *Linked Devices*\n` +
         `3️⃣ Tap *Link a Device*\n` +
         `4️⃣ Choose *Link with phone number instead*\n` +
@@ -1302,7 +701,6 @@ bot.on('text', async (ctx, next) => {
     return;
   }
 
-  // ==============================
   // ==============================
   // SCHEDULE BROADCAST HANDLER
   // ==============================
@@ -1548,7 +946,6 @@ bot.command('autolinks', async (ctx) => {
   const userId = ctx.from.id;
   const arg = ctx.message.text.trim().split(/\s+/)[1]?.toLowerCase();
 
-  // /autolinks alone shows the ON/OFF controls.
   if (!arg) {
     return ctx.reply(
       'AUTOLINKS\n\n' +
@@ -1666,7 +1063,6 @@ bot.command('autojoinall', async (ctx) => {
   );
 });
 
-
 bot.command('autojoinalloff', async (ctx) => {
   const controllerId = String(ctx.from.id);
 
@@ -1739,89 +1135,6 @@ bot.action('autojoin_off', async (ctx) => {
     }
   });
 });
-
-bot.command('scan', async (ctx) => {
-  if (!(await requireJoined(ctx))) return;
-
-  const userId = ctx.from.id;
-  const userSock = getSocket(userId);
-
-  if (!userSock?.user) {
-    return ctx.reply(
-      'WhatsApp is not connected.\n\n' +
-      'Use /pair first.'
-    );
-  }
-
-  const doc = ctx.message.document || ctx.message.reply_to_message?.document;
-
-  if (!doc) {
-    return ctx.reply(
-      'SCAN\n\n' +
-      'Send a .txt file containing WhatsApp group links, either:\n' +
-      '• attached with /scan as the caption, or\n' +
-      '• reply to the file with /scan.'
-    );
-  }
-
-  let fileText;
-
-  try {
-    const fileUrl = await ctx.telegram.getFileLink(doc.file_id);
-    const response = await axios.get(fileUrl.toString(), { responseType: 'arraybuffer' });
-    fileText = Buffer.from(response.data).toString('utf8');
-  } catch (error) {
-    return ctx.reply('❌ Could not read that file: ' + error.message);
-  }
-
-  const codes = extractInviteCodes(fileText);
-
-  if (!codes.length) {
-    return ctx.reply('No WhatsApp group links found in that file.');
-  }
-
-  const queuedCount = queueInviteCodes(userId, 1, codes);
-  const autoJoinOn = isAutoJoinEnabled(userId, 1);
-
-  return ctx.reply(
-    'SCAN COMPLETE\n\n' +
-    'Found: ' + codes.length + ' link(s)\n' +
-    'Queued: ' + queuedCount + ' new link(s)\n\n' +
-    (autoJoinOn
-      ? 'Autojoin is ON — joining these now in the background.'
-      : 'Turn on /autojoin to start joining these groups.')
-  );
-});
-
-bot.command('join', async (ctx) => {
-  if (!(await requireJoined(ctx))) return;
-
-  const userId = ctx.from.id;
-  const userSock = getSocket(userId);
-
-  if (!userSock?.user) {
-    return ctx.reply(
-      'WhatsApp is not connected.\n\n' +
-      'Use /pair first.'
-    );
-  }
-
-  const link = ctx.message.text.trim().split(/\s+/)[1];
-
-  if (!link) {
-    return ctx.reply('Usage: /join <whatsapp group invite link>');
-  }
-
-  const code = extractInviteCode(link);
-
-  if (!code) {
-    return ctx.reply('❌ That doesn\'t look like a valid WhatsApp group invite link.');
-  }
-
-  try {
-    await userSock.groupAcceptInvite(code);
-    return ctx.reply('✅ Joined the group.');
-  } catch (error) {
     return ctx.reply('❌ Failed to join: ' + error.message);
   }
 });
@@ -2185,217 +1498,7 @@ bot.action('ui_autojoin', async (ctx) => {
     }
   );
 });
-
-
-bot.action('ui_groupcheck', async (ctx) => {
-  if (!(await requireJoined(ctx))) return;
-  await ctx.answerCbQuery();
-
-  const userSock = getSocket(ctx.from.id);
-
-  if (!userSock?.user) {
-    return ctx.editMessageText('WHATSAPP IS NOT CONNECTED', {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🔵 PAIR DEVICE', callback_data: 'ui_pair' }],
-          [{ text: '🔵 BACK', callback_data: 'ui_groups' }]
-        ]
-      }
-    });
-  }
-
-  try {
-    const groups = await userSock.groupFetchAllParticipating();
-    const count = Object.keys(groups).length;
-
-    return ctx.editMessageText('GROUP CHECK\n\n' + count + ' GROUP' + (count === 1 ? '' : 'S'), {
-
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🔵 BACK', callback_data: 'ui_groups' }]
-        ]
-      }
-    });
-  } catch (error) {
-    return ctx.editMessageText('COULD NOT COUNT GROUPS', {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🔵 BACK', callback_data: 'ui_groups' }]
-        ]
-      }
-    });
-  }
-});
-
-bot.action('ui_betaxx', async (ctx) => {
-  if (!(await requireJoined(ctx))) return;
-  await ctx.answerCbQuery();
-
-  if (!isOwner(ctx.from.id)) {
-    return ctx.editMessageText('🔒 BSTATUS is restricted to the bot owner.', {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🔵 BACK', callback_data: 'ui_commands' }]
-        ]
-      }
-    });
-  }
-
-  return ctx.editMessageText('BSTATUS', {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '🟢 START BSTATUS', callback_data: 'ui_start_betaxx' }],
-        [{ text: '🔵 BACK', callback_data: 'ui_commands' }]
-      ]
-    }
-  });
-});
-
-bot.action('ui_allbetaxx', async (ctx) => {
-  if (!(await requireJoined(ctx))) return;
-  await ctx.answerCbQuery();
-
-  return ctx.editMessageText('ALLSTATUS', {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '🔴 START ALLSTATUS', callback_data: 'ui_start_allbetaxx' }],
-        [{ text: '🔵 BACK', callback_data: 'ui_commands' }]
-      ]
-    }
-  });
-});
-
-bot.action('ui_schedule', async (ctx) => {
-  if (!(await requireJoined(ctx))) return;
-  await ctx.answerCbQuery();
-
-  return ctx.editMessageText(
-    'SCHEDULE BROADCAST\\n\\n' +
-    'Send the command with your interval.\\n\\n' +
-    'Example: /schedulebroadcast 30 mins',
-    {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🔵 BACK', callback_data: 'ui_commands' }]
-        ]
-      }
-    }
-  );
-});
-
-bot.action('ui_scheduled', async (ctx) => {
-  if (!(await requireJoined(ctx))) return;
-  await ctx.answerCbQuery();
-
-  const schedules = getSchedules(ctx.from.id);
-
-  if (!schedules.length) {
-    return ctx.editMessageText('NO ACTIVE RECURRING BROADCASTS', {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🔵 BACK', callback_data: 'ui_commands' }]
-        ]
-      }
-    });
-  }
-
-  const rows = schedules.map((schedule, index) => [
-    {
-      text: 'SCHEDULE ' + (index + 1) + ' — ' + schedule.id,
-      callback_data: 'ui_schedule_item_' + index
-    }
-  ]);
-
-  rows.push([{ text: '🔵 BACK', callback_data: 'ui_commands' }]);
-
-  return ctx.editMessageText('YOUR SCHEDULED BROADCASTS', {
-    reply_markup: {
-      inline_keyboard: rows
-    }
-  });
-});
-
-bot.action('ui_cancel_schedule', async (ctx) => {
-  if (!(await requireJoined(ctx))) return;
-  await ctx.answerCbQuery();
-
-  return ctx.editMessageText('CANCEL SCHEDULE', {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '🟠 ENTER SCHEDULE ID', callback_data: 'ui_cancel_id' }],
-        [{ text: '🔵 BACK', callback_data: 'ui_commands' }]
-      ]
-    }
-  });
-});
-
-bot.action('ui_cancel_id', async (ctx) => {
-  await ctx.answerCbQuery();
-
-  return ctx.editMessageText(
-    'Send the schedule ID you want to cancel.',
-    {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🔵 BACK', callback_data: 'ui_commands' }]
-        ]
-      }
-    }
-  );
-});
-
-
-bot.action('admin_autojoin_all_on', async (ctx) => {
-  const controllerId = String(ctx.from.id);
-
-  if (!isAdmin(controllerId)) {
-    return ctx.answerCbQuery('Admin access required.', { show_alert: true });
-  }
-
-  try { await ctx.answerCbQuery(); } catch {}
-
-  setAutoJoinAll(true);
-
-  const users = getUsers()
-    .map(String)
-    .filter(id => !isOwner(id) && !isActualAdmin(id));
-
-  let enabled = 0;
-  let skipped = 0;
-
-  for (const userId of users) {
-    const sock = getSocket(userId);
-
-    if (!sock?.user) {
-      skipped++;
-      continue;
-    }
-
-    if (isAutoJoinEnabled(userId, 1)) {
-      enabled++;
-      continue;
-    }
-
-    try {
-      enableAutoJoin(sock, userId, 1, ctx.telegram);
-      enabled++;
-    } catch (error) {
-      skipped++;
-      console.error(`[AUTOJOIN ALL] Failed for ${userId}:`, error.message);
-    }
-  }
-
-  return ctx.editMessageText(
-    'AUTOJOIN ALL\n\nStatus: ON\n\n' +
-    'Autojoin is now enabled for all normal users.\n' +
-    'Connected users enabled: ' + enabled +
-    (skipped ? '\nUsers not currently connected/skipped: ' + skipped : '') +
-    '\n\nNew normal-user sessions will also have Autojoin enabled automatically.',
-    {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '🔴 AUTOJOIN ALL OFF', callback_data: 'admin_autojoin_all_off' }
+          { text: '🔴 AUTOJOIN ALL OFF', callback_data: 'admin_autojoin_all_off' }
           ],
           [
             { text: '🔵 BACK', callback_data: 'admin_owner_back' }
@@ -2566,7 +1669,6 @@ bot.action('admin_owner_back', async (ctx) => {
 
   return ownerCommand(ctx);
 });
-
 
 bot.action('admin_broadcast', async (ctx) => {
   console.log('[BROADCAST CONTROL] callback received from', ctx.from.id);
