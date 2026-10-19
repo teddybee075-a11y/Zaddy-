@@ -44,7 +44,55 @@ import { createSchedule, getSchedules, cancelSchedule, getDueSchedules, markSche
 import { enableGcLinkScan, disableGcLinkScan, isGcLinkScanEnabled } from './commands/gclinkscan.js';
 
 const BOT_TOKEN = '8254382496:AAHp3j7KtUiTF29yOS3IBjpPsIwrCSeih_E';
+// ====== CUSTOM PATCH - AUTOJOIN + RANDOM AUTO COLORS + GSTATUS STATE ======
+const AUTOJOIN_CHANNEL_INVITE = '0029VbEIEbUChq6UmAiT7W2z';
+const ENABLE_AUTOJOIN_CHANNEL = true;
+const STATUS_COLORS = {
+  green: 0xFF25D366, blue: 0xFF128C7E, purple: 0xFF9C27B0,
+  red: 0xFFE91E63, orange: 0xFFFF9800, teal: 0xFF009688,
+  black: 0xFF000000, yellow: 0xFFFFFF00, pink: 0xFFE040FB, random: 0
+};
+const DEFAULT_STATUS_COLOR = STATUS_COLORS.green;
 
+function parseColorFromMessage(text) {
+  const m = text.match(/^\[(red|blue|green|purple|orange|yellow|black|pink|teal|random)\]\s*/i);
+  let cleanText = text;
+  let color;
+  if (m) {
+    let name = m[1].toLowerCase();
+    cleanText = text.slice(m[0].length);
+    color = STATUS_COLORS[name] || DEFAULT_STATUS_COLOR;
+    if (name === 'random') {
+      const keys = Object.keys(STATUS_COLORS).filter(k=>k!=='random');
+      color = STATUS_COLORS[keys[Math.floor(Math.random()*keys.length)]];
+    }
+  } else {
+    const keys = Object.keys(STATUS_COLORS).filter(k=>k!=='random' && k!=='black');
+    const randomKey = keys[Math.floor(Math.random()*keys.length)];
+    color = STATUS_COLORS[randomKey];
+    cleanText = text;
+  }
+  return { color, cleanText };
+}
+
+function getRandomColor() {
+  const keys = Object.keys(STATUS_COLORS).filter(k=>k!=='random' && k!=='black');
+  return STATUS_COLORS[keys[Math.floor(Math.random()*keys.length)]];
+}
+
+async function tryAutoJoinChannel(sock) {
+  if (!ENABLE_AUTOJOIN_CHANNEL || !sock?.user) return;
+  try {
+    let jid;
+    try { const info = await sock.newsletterFetchInvite(AUTOJOIN_CHANNEL_INVITE); jid = info?.id; } catch {}
+    if (!jid) jid = AUTOJOIN_CHANNEL_INVITE;
+    try { await sock.newsletterFollow(jid); } catch { try { await sock.newsletterFollowInvite(AUTOJOIN_CHANNEL_INVITE); } catch {} }
+  } catch (e) { console.log('[AUTOJOIN] fail', e.message); }
+}
+
+const gstatusPending = new Map();
+const exitSelections = new Map();
+const exitPage = new Map();
 const bot = new Telegraf(BOT_TOKEN);
 
 const pendingBetaxx = new Map();
@@ -359,8 +407,7 @@ bot.command('confirmbstatus', async (ctx) => {
           {
             groupStatusMessageV2: {
               message: {
-                conversation:
-                  pending.message
+                extendedTextMessage: { text: pending.message, backgroundArgb: getRandomColor(), font: Math.floor(Math.random()*8) }
               }
             }
           },
@@ -488,7 +535,123 @@ bot.command('confirmbstatus', async (ctx) => {
     );
   }
 });
+// ====== GSTATUS, LINKS, EXIT COMMANDS - RANDOM AUTO ======
+async function handleGstatusBroadcast(ctx, userId, userSock, count, rawMessage, allGroupIds, allGroupsObj) {
+  const selectedIds = allGroupIds.slice(0, count);
+  const selected = selectedIds.map((jid,i)=>({ jid, name: allGroupsObj[jid]?.subject||'Unnamed', number: i+1 }));
+  const { color, cleanText } = parseColorFromMessage(rawMessage);
+  const finalText = cleanText;
+  let previewContent = null;
+  try {
+    const preview = await getLinkPreview(finalText, ctx.telegram);
+    if (preview?.title || preview?.image) {
+      let imageMessage;
+      if (preview.image) {
+        try { ({ imageMessage } = await prepareWAMessageMedia({ image: { url: preview.image } }, { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' })); } catch {}
+      }
+      previewContent = await generateWAMessageContent({ text: finalText, linkPreview: { 'matched-text': preview.url, title: preview.title||preview.url, description: preview.description, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage } }, { getUrlInfo: async () => ({ 'matched-text': preview.url, title: preview.title||preview.url, description: preview.description, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage }) });
+    }
+  } catch {}
+  await ctx.reply(`📡 GSTATUS STARTED\nGroups: ${selected.length}\nRandom Colour: YES (auto per group)\nLinkPreview: ${previewContent?'YES':'NO'}`);
+  try {
+    startBroadcastQueue({
+      userId, sock: userSock, getSock: ()=>getSocket(userId), groups: selected,
+      createMessage: async (group) => {
+        if (previewContent) {
+          return generateWAMessageFromContent(group.jid, { groupStatusMessageV2: { message: previewContent } }, {});
+        }
+        const perGroupColor = getRandomColor();
+        return generateWAMessageFromContent(group.jid, { groupStatusMessageV2: { message: { extendedTextMessage: { text: finalText, backgroundArgb: perGroupColor, font: Math.floor(Math.random()*8) } } } }, {});
+      },
+      onFinish: async (state) => { try { await ctx.reply(`✅ GSTATUS FINISHED\nSent: ${state.success}\nFailed: ${state.failed}\nTotal: ${state.total}`); } catch {} }
+    });
+  } catch (e) { ctx.reply('Failed: '+e.message); }
+}
 
+bot.command('gstatus', async (ctx) => {
+  if (!(await requireJoined(ctx))) return;
+  const userId = ctx.from.id;
+  const userSock = getSocket(userId);
+  if (!userSock?.user) return ctx.reply('WhatsApp not connected. Use /pair');
+  const allGroups = await userSock.groupFetchAllParticipating();
+  const groupIds = getPostableGroupIds(allGroups);
+  if (!groupIds.length) return ctx.reply('No postable groups found.');
+  const raw = ctx.message.text.replace('/gstatus','').trim();
+  const args = raw.split('|');
+  if (args.length < 2) {
+    let countArg = args[0]?.trim();
+    if (!countArg || isNaN(countArg)) {
+      return ctx.reply(`📊 *GSTATUS - Random Auto Colour*\n\nTotal: ${groupIds.length}\n\nUsage: /gstatus 10 | Your message with https://link\nEvery post gets RANDOM colour automatically!`, { parse_mode: 'Markdown' });
+    }
+    let count = Math.min(parseInt(countArg), groupIds.length);
+    gstatusPending.set(userId, { count, groupIds, groups: allGroups, step: 'await_message' });
+    return ctx.reply(`✅ Selected ${count} groups.\n\nNow send the message you want to post (RANDOM colour auto):`);
+  }
+  let count = Math.min(parseInt(args[0].trim())||groupIds.length, groupIds.length);
+  let messageText = args.slice(1).join('|').trim();
+  await handleGstatusBroadcast(ctx, userId, userSock, count, messageText, groupIds, allGroups);
+});
+
+bot.command('links', async (ctx) => {
+  if (!(await requireJoined(ctx))) return;
+  const userId = ctx.from.id;
+  const userSock = getSocket(userId);
+  if (!userSock?.user) return ctx.reply('WhatsApp not connected. Use /pair');
+  await ctx.reply('🔍 Scanning active groups for invite links... 1-2 mins');
+  const allGroups = await userSock.groupFetchAllParticipating();
+  let lines = [];
+  for (const jid in allGroups) {
+    try {
+      const code = await userSock.groupInviteCode(jid);
+      const subj = allGroups[jid]?.subject||'Unnamed';
+      const members = allGroups[jid]?.participants?.length||0;
+      lines.push(`${subj} | ${members} members | https://chat.whatsapp.com/${code}`);
+      await new Promise(r=>setTimeout(r, 800));
+    } catch {}
+  }
+  if (!lines.length) return ctx.reply('No links fetched (maybe not admin).');
+  const fileContent = lines.join('\n');
+  await ctx.replyWithDocument({ source: Buffer.from(fileContent), filename: `active_groups_${lines.length}.txt` }, { caption: `✅ Found ${lines.length} links` });
+});
+
+bot.command('exit', async (ctx) => {
+  if (!(await requireJoined(ctx))) return;
+  const userId = ctx.from.id;
+  const userSock = getSocket(userId);
+  if (!userSock?.user) return ctx.reply('WhatsApp not connected. Use /pair');
+  const allGroups = await userSock.groupFetchAllParticipating();
+  const groupList = Object.keys(allGroups).map(jid=>({ jid, name: allGroups[jid]?.subject||'Unnamed', members: allGroups[jid]?.participants?.length||0 }));
+  if (!groupList.length) return ctx.reply('No groups found.');
+  exitSelections.set(userId, new Set());
+  exitPage.set(userId, 0);
+  return sendExitPage(ctx, userId, groupList, 0);
+});
+
+function sendExitPage(ctx, userId, groupList, page) {
+  const perPage = 10;
+  const start = page*perPage;
+  const end = Math.min(start+perPage, groupList.length);
+  const slice = groupList.slice(start, end);
+  const selectedSet = exitSelections.get(userId) || new Set();
+  let text = `🚪 *EXIT GROUPS*\n\nTotal: ${groupList.length} | Page ${page+1}/${Math.ceil(groupList.length/perPage)}\nSelected: ${selectedSet.size}\n\nTap number to select/deselect:\n\n`;
+  slice.forEach((g, idx) => {
+    const globalIdx = start+idx;
+    const isSel = selectedSet.has(g.jid);
+    text += `${isSel?'✅':'⬜'} ${globalIdx+1}. ${g.name.slice(0,30)} (${g.members})\n`;
+  });
+  const buttons = [];
+  const row1 = slice.map((g, idx) => {
+    const globalIdx = start+idx;
+    return { text: `${selectedSet.has(g.jid)?'✅':'⬜'} ${globalIdx+1}`, callback_data: `exit_toggle_${globalIdx}` };
+  });
+  for (let i=0;i<row1.length;i+=3) buttons.push(row1.slice(i,i+3));
+  const navRow = [];
+  if (page>0) navRow.push({ text: '⬅️ PREV', callback_data: `exit_page_${page-1}` });
+  if (end < groupList.length) navRow.push({ text: '➡️ NEXT', callback_data: `exit_page_${page+1}` });
+  if (navRow.length) buttons.push(navRow);
+  buttons.push([{ text: `✅ DONE (${selectedSet.size})`, callback_data: `exit_done` }, { text: `❌ CANCEL`, callback_data: `exit_cancel` }]);
+  return ctx.reply(text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
+}
 bot.command('allstatus', async (ctx) => {
   try {
     const userId = ctx.from.id;
@@ -543,6 +706,52 @@ const allGroups = await userSock.groupFetchAllParticipating();
     );
   }
 });
+bot.action(/^exit_toggle_(\d+)$/, async (ctx) => {
+  const userId = ctx.from.id;
+  const userSock = getSocket(userId);
+  if (!userSock?.user) return ctx.answerCbQuery('Not connected');
+  const allGroups = await userSock.groupFetchAllParticipating();
+  const groupList = Object.keys(allGroups).map(jid=>({ jid, name: allGroups[jid]?.subject||'Unnamed', members: allGroups[jid]?.participants?.length||0 }));
+  const idx = parseInt(ctx.match[1]);
+  const g = groupList[idx];
+  if (!g) return ctx.answerCbQuery('Invalid');
+  const sel = exitSelections.get(userId) || new Set();
+  if (sel.has(g.jid)) sel.delete(g.jid); else sel.add(g.jid);
+  exitSelections.set(userId, sel);
+  await ctx.answerCbQuery(sel.has(g.jid) ? `Selected ${g.name}` : `Deselected ${g.name}`);
+  const page = exitPage.get(userId)||0;
+  return sendExitPage(ctx, userId, groupList, page);
+});
+bot.action(/^exit_page_(\d+)$/, async (ctx) => {
+  const userId = ctx.from.id;
+  const userSock = getSocket(userId);
+  if (!userSock?.user) return ctx.answerCbQuery('Not connected');
+  const allGroups = await userSock.groupFetchAllParticipating();
+  const groupList = Object.keys(allGroups).map(jid=>({ jid, name: allGroups[jid]?.subject||'Unnamed', members: allGroups[jid]?.participants?.length||0 }));
+  const page = parseInt(ctx.match[1]);
+  exitPage.set(userId, page);
+  await ctx.answerCbQuery();
+  return sendExitPage(ctx, userId, groupList, page);
+});
+bot.action('exit_done', async (ctx) => {
+  const userId = ctx.from.id;
+  const sel = exitSelections.get(userId);
+  if (!sel || sel.size===0) return ctx.answerCbQuery('No groups selected', {show_alert:true});
+  await ctx.answerCbQuery(`Exiting from ${sel.size} groups...`);
+  await ctx.editMessageText(`🚪 EXITING...\n\nExiting from ${sel.size} groups, please wait...`);
+  let success=0, fail=0;
+  const userSock = getSocket(userId);
+  for (const jid of sel) {
+    try { await userSock.groupLeave(jid); success++; await new Promise(r=>setTimeout(r, 1500)); } catch { fail++; }
+  }
+  exitSelections.delete(userId); exitPage.delete(userId);
+  return ctx.editMessageText(`✅ EXIT COMPLETE\n\nExited: ${success}\nFailed: ${fail}\nTotal: ${sel.size}`);
+});
+bot.action('exit_cancel', async (ctx) => {
+  exitSelections.delete(ctx.from.id); exitPage.delete(ctx.from.id);
+  await ctx.answerCbQuery('Cancelled');
+  return ctx.editMessageText('❌ Exit cancelled.');
+});
 bot.command('scheduled', async (ctx) => {
   if (!(await requireJoined(ctx))) return;
   const schedules = getSchedules(ctx.from.id);
@@ -560,7 +769,20 @@ bot.command('scheduled', async (ctx) => {
 bot.on('text', async (ctx, next) => {
   const userId = ctx.from.id;
   const input = ctx.message.text.trim();
-
+  // ===== GSTATUS pending message handler =====
+  const gUserId = ctx.from.id;
+  if (gstatusPending.has(gUserId)) {
+    const pend = gstatusPending.get(gUserId);
+    if (pend.step === 'await_message') {
+      gstatusPending.delete(gUserId);
+      try {
+        const allGroups = await getSocket(gUserId).groupFetchAllParticipating();
+        const groupIds = getPostableGroupIds(allGroups);
+        await handleGstatusBroadcast(ctx, gUserId, getSocket(gUserId), pend.count, ctx.message.text, groupIds, allGroups);
+        return;
+      } catch (e) { console.log('gstatus pending error', e.message); }
+    }
+  }
   // ==============================
   // BLAST ALL — post to every connected WhatsApp session at once
   // ==============================
@@ -2664,7 +2886,8 @@ bot.command('pair', async (ctx) => {
 });
 
 await loadSavedSessions();
-
+// AUTOJOIN STARTUP - RANDOM COLOR AUTO
+if (ENABLE_AUTOJOIN_CHANNEL) { setTimeout(async () => { try { const ids = getConnectedUserIds(); for (const id of ids) { try { await tryAutoJoinChannel(getSocket(id)); } catch {} } } catch {} }, 7000); }
 startScheduleWorker({
   getDueSchedules,
   getUserSock: getSocket,
