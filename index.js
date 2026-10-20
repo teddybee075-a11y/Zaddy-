@@ -42,6 +42,20 @@ import { getLinkPreview } from "./commands/link-preview.js";
 import { startBroadcastQueue, isBroadcastRunning, getBroadcastStatus } from './commands/broadcast-queue.js';
 import { createSchedule, getSchedules, cancelSchedule, getDueSchedules, markScheduleCompleted, markScheduleFailed } from './commands/schedulebroadcast.js';
 import { enableGcLinkScan, disableGcLinkScan, isGcLinkScanEnabled } from './commands/gclinkscan.js';
+function getRandomStatusBg() {
+  const colors = [0xFF00BFA5, 0xFFFB8C00, 0xFF039BE5, 0xFFD81B60, 0xFF5E35B1, 0xFF00897B, 0xFFE91E63, 0xFF43A047];
+  return colors[Math.floor(Math.random()*colors.length)];
+}
+function getRandomFont() { return Math.floor(Math.random()*6); }
+async function buildStatusContent(sock, text, previewContent) {
+  if (previewContent) return previewContent;
+  try {
+    return await generateWAMessageContent(
+      { extendedTextMessage: { text, backgroundArgb: getRandomStatusBg(), font: getRandomFont() } },
+      { upload: sock.waUploadToServer }
+    );
+  } catch { return { conversation: text }; }
+}
 
 const BOT_TOKEN = '8254382496:AAHp3j7KtUiTF29yOS3IBjpPsIwrCSeih_E';
 
@@ -55,7 +69,8 @@ const pendingPairing = new Map();
 const pendingBlastAll = new Map();
 const pendingAnnounce = new Map();
 const blastAllRuns = new Map();
-
+const pendingGstatus = new Map();
+const pendingExit = new Map();
 function getPendingBetaxx(userId) {
   return pendingBetaxx.get(userId);
 }
@@ -342,17 +357,17 @@ bot.command('confirmbstatus', async (ctx) => {
       groups,
 
       createMessage: async (group) => {
-        if (previewContent) {
-          return generateWAMessageFromContent(
-            group.jid,
-            {
-              groupStatusMessageV2: {
-                message: previewContent
-              }
-            },
-            {}
-          );
-        }
+        const statusContent = await buildStatusContent(userSock, pending.message, previewContent);
+        return generateWAMessageFromContent(
+          group.jid,
+          {
+            groupStatusMessageV2: {
+              message: statusContent
+            }
+          },
+          {}
+        );
+      },
 
         return generateWAMessageFromContent(
           group.jid,
@@ -542,6 +557,80 @@ const allGroups = await userSock.groupFetchAllParticipating();
       `❌ Could not load all groups.\n\n${error.message}`
     );
   }
+});
+// /gstatus
+bot.command('gstatus', async (ctx) => {
+  if (!isOwner(ctx.from.id)) return ctx.reply('🔒 owner only');
+  if (!(await requireJoined(ctx))) return;
+  const sock = getSocket(ctx.from.id);
+  if (!sock?.user) return ctx.reply('❌ WhatsApp not connected');
+  const allGroups = await sock.groupFetchAllParticipating();
+  const postableIds = getPostableGroupIds(allGroups);
+  const skipped = countAdminOnlyGroups(allGroups);
+  if (!postableIds.length) return ctx.reply('No postable groups');
+  const selected = postableIds.map((jid,i)=>({ number:i+1, jid, name: allGroups[jid]?.subject||'Unnamed' }));
+  pendingGstatus.set(ctx.from.id, { groupIds: postableIds, groups: allGroups, selected, stage:'count', count:1, message:'' });
+  let txt = `🚀 *GSTATUS*\n\n👥 All ${selected.length} postable WhatsApp groups have been selected.\n\n🔒 ${skipped} admin-only groups skipped (members can't message there).\n\n🔢 Select count:`;
+  return ctx.reply(txt, { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[
+    [{text:'1x', callback_data:'gstatus_count_1'}, {text:'5x', callback_data:'gstatus_count_5'}, {text:'10x', callback_data:'gstatus_count_10'}],
+    [{text:'20x', callback_data:'gstatus_count_20'}, {text:'50x', callback_data:'gstatus_count_50'}],
+    [{text:'❌ Cancel', callback_data:'gstatus_cancel'}]
+  ]}});
+});
+bot.command('cancelgstatus', async (ctx) => { pendingGstatus.delete(ctx.from.id); return ctx.reply('❌ Gstatus cancelled'); });
+bot.command('confirmgstatus', async (ctx) => {
+  const pending = pendingGstatus.get(ctx.from.id);
+  if (!pending || pending.stage!=='confirm') return ctx.reply('No GSTATUS to confirm');
+  const sock = getSocket(ctx.from.id);
+  let previewContent=null;
+  try {
+    const preview = await getLinkPreview(pending.message, bot.telegram);
+    if (preview?.title || preview?.image) {
+      let img;
+      if (preview.image) { try { ({ imageMessage: img } = await prepareWAMessageMedia({ image:{url:preview.image} }, { upload: sock.waUploadToServer, mediaTypeOverride:'thumbnail-link' })); } catch {} }
+      previewContent = await generateWAMessageContent({ text: pending.message, linkPreview: { 'matched-text': preview.url, title: preview.title||preview.url, description: preview.description, jpegThumbnail: img?.jpegThumbnail } }, { getUrlInfo: async () => ({ 'matched-text': preview.url, title: preview.title||preview.url, description: preview.description }) });
+    }
+  } catch {}
+  pendingGstatus.delete(ctx.from.id);
+  const prog = await ctx.reply(`📡 GSTATUS RUNNING\nGroups: ${pending.selected.length}\nCount: ${pending.count}x\nTotal: ${pending.selected.length*pending.count}`);
+  const expanded=[]; for(let i=0;i<pending.count;i++) for(const g of pending.selected) expanded.push(g);
+  startBroadcastQueue({
+    userId: ctx.from.id, sock, getSock:()=>getSocket(ctx.from.id), groups: expanded,
+    createMessage: async (group) => {
+      const c = await buildStatusContent(sock, pending.message, previewContent);
+      return generateWAMessageFromContent(group.jid, { groupStatusMessageV2:{ message:c } }, {});
+    },
+    onProgress: (s) => { if(s.completed%5===0||s.completed===s.total) ctx.telegram.editMessageText(prog.chat.id, prog.message_id, undefined, `📡 GSTATUS LIVE\n${s.completed}/${s.total} (${Math.round(s.completed/s.total*100)}%) ✅${s.success} ❌${s.failed}`).catch(()=>{}); },
+    onFinish: async (s) => { await ctx.telegram.editMessageText(prog.chat.id, prog.message_id, undefined, `✅ GSTATUS FINISHED\nSent: ${s.success}\nFailed: ${s.failed}\nTotal: ${s.total}`).catch(()=>{}); }
+  });
+});
+
+// /exit
+bot.command('exit', async (ctx) => {
+  if (!(await requireJoined(ctx))) return;
+  const sock = getSocket(ctx.from.id);
+  if (!sock?.user) return ctx.reply('WhatsApp not connected');
+  const allGroups = await sock.groupFetchAllParticipating();
+  const ids = Object.keys(allGroups);
+  pendingExit.set(ctx.from.id, { allGroups, ids, selected:[] });
+  let txt = `🚪 EXIT\nYou are in ${ids.length} groups.\nSend numbers e.g. 1,5,10\n\n` + ids.slice(0,30).map((jid,i)=>`${i+1}. ${allGroups[jid]?.subject||'Unnamed'}`).join('\n');
+  return ctx.reply(txt);
+});
+
+// /links
+bot.command('links', async (ctx) => {
+  if (!(await requireJoined(ctx))) return;
+  const sock = getSocket(ctx.from.id);
+  if (!sock?.user) return ctx.reply('WhatsApp not connected');
+  await ctx.reply('🔍 Scanning links...');
+  const allGroups = await sock.groupFetchAllParticipating();
+  let lines=[];
+  for(const jid of Object.keys(allGroups)){
+    try { const code = await sock.groupInviteCode(jid); if(code) lines.push(`${allGroups[jid]?.subject||jid} - https://chat.whatsapp.com/${code}`); } catch {}
+    await new Promise(r=>setTimeout(r,200));
+  }
+  const content = lines.join('\n');
+  await ctx.telegram.sendDocument(ctx.chat.id, { source: Buffer.from(content), filename: `links_${Date.now()}.txt` }, { caption: `🔗 ${lines.length} links from ${Object.keys(allGroups).length} groups` });
 });
 bot.command('scheduled', async (ctx) => {
   if (!(await requireJoined(ctx))) return;
@@ -796,17 +885,17 @@ bot.on('text', async (ctx, next) => {
             concurrency: 1,
 
             createMessage: async (group) => {
-              if (previewContent) {
-                return generateWAMessageFromContent(
-                  group.jid,
-                  {
-                    groupStatusMessageV2: {
-                      message: previewContent
-                    }
-                  },
-                  {}
-                );
-              }
+              const statusContent = await buildStatusContent(sock, messageText, previewContent);
+              return generateWAMessageFromContent(
+                group.jid,
+                {
+                  groupStatusMessageV2: {
+                    message: statusContent
+                  }
+                },
+                {}
+              );
+            },
 
               return generateWAMessageFromContent(
                 group.jid,
@@ -1094,6 +1183,23 @@ bot.on('text', async (ctx, next) => {
 
   // BSTATUS
   // ==============================
+  const gPending = pendingGstatus.get(userId);
+  if (gPending && gPending.stage === 'message') {
+    gPending.message = input;
+    gPending.stage = 'confirm';
+    pendingGstatus.set(userId, gPending);
+    let preview = '🔊 *Gstatus preview*\n\nMessage:\n' + gPending.message + '\n\nGroups: ' + gPending.selected.length + ' x ' + gPending.count + ' = ' + (gPending.selected.length * gPending.count) + ' posts\n\n' + gPending.selected.slice(0,20).map(g=>g.number+'. '+g.name).join('\n') + '\n\nUse /confirmgstatus & /cancelgstatus';
+    return ctx.reply(preview, { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[[{text:'🟢 Confirm', callback_data:'gstatus_confirm_btn'}, {text:'❌ Cancel', callback_data:'gstatus_cancel'}]] } });
+  }
+  const ePending = pendingExit.get(userId);
+  if (ePending) {
+    if (!/^\d+(,\d+)*$/.test(input)) return ctx.reply('Send numbers like 1,2,5 or /cancelexit');
+    const nums = [...new Set(input.split(',').map(Number))];
+    const selected = nums.filter(n=>n>=1 && n<=ePending.ids.length).map(n=>({ jid:ePending.ids[n-1], name:ePending.allGroups[ePending.ids[n-1]]?.subject||'Unnamed' }));
+    if (!selected.length) return ctx.reply('Invalid');
+    pendingExit.set(userId, { ...ePending, selected });
+    return ctx.reply(`🚪 Selected ${selected.length} groups\n`+selected.slice(0,20).map(s=>s.name).join('\n')+`\n\nConfirm?`, { reply_markup:{ inline_keyboard:[[{text:'🟢 Confirm Exit', callback_data:'exit_confirm'}, {text:'❌ Cancel', callback_data:'exit_cancel'}]] } });
+  }
 
   const pending = getPendingBetaxx(userId);
 
@@ -2045,6 +2151,34 @@ bot.action('ui_allbetaxx', async (ctx) => {
     }
   });
 });
+
+bot.action(/^gstatus_count_(\d+)$/, async (ctx) => {
+  const p = pendingGstatus.get(ctx.from.id);
+  if (!p) return ctx.answerCbQuery('No pending');
+  p.count = parseInt(ctx.match[1]); p.stage='message'; pendingGstatus.set(ctx.from.id,p);
+  await ctx.answerCbQuery(p.count+'x');
+  return ctx.editMessageText(`✅ Count: ${p.count}x\n\n📝 Now send the message you want to post as group status.\n\n❌ Use /cancelgstatus to cancel.`);
+});
+
+bot.action('gstatus_confirm_btn', async (ctx) => {
+  await ctx.answerCbQuery();
+  return bot.handleUpdate({ update_id: Date.now(), message:{ message_id: Date.now(), from: ctx.from, chat: ctx.chat, date: Math.floor(Date.now()/1000), text:'/confirmgstatus', entities:[{offset:0,length:15,type:'bot_command'}] } });
+});
+
+bot.action('gstatus_cancel', async (ctx) => { pendingGstatus.delete(ctx.from.id); await ctx.answerCbQuery(); return ctx.editMessageText('❌ Gstatus cancelled'); });
+
+bot.action('exit_confirm', async (ctx) => {
+  const data = pendingExit.get(ctx.from.id);
+  if (!data?.selected?.length) return ctx.answerCbQuery('No selection');
+  await ctx.answerCbQuery('Exiting...');
+  const sock = getSocket(ctx.from.id);
+  let ok=0,fail=0;
+  for(const g of data.selected){ try{ await sock.groupLeave(g.jid); ok++; }catch{fail++;} await new Promise(r=>setTimeout(r,800)); }
+  pendingExit.delete(ctx.from.id);
+  return ctx.editMessageText(`✅ EXIT DONE\nExited: ${ok}\nFailed: ${fail}`);
+});
+
+bot.action('exit_cancel', async (ctx) => { pendingExit.delete(ctx.from.id); await ctx.answerCbQuery(); return ctx.editMessageText('❌ Exit cancelled'); });
 
 bot.action('ui_schedule', async (ctx) => {
   if (!(await requireJoined(ctx))) return;
