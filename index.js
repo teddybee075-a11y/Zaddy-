@@ -369,20 +369,6 @@ bot.command('confirmbstatus', async (ctx) => {
         );
       },
 
-        return generateWAMessageFromContent(
-          group.jid,
-          {
-            groupStatusMessageV2: {
-              message: {
-                conversation:
-                  pending.message
-              }
-            }
-          },
-          {}
-        );
-      },
-
       onProgress: (state) => {
         if (
           state.completed % 25 === 0 ||
@@ -891,17 +877,6 @@ bot.on('text', async (ctx, next) => {
                 {
                   groupStatusMessageV2: {
                     message: statusContent
-                  }
-                },
-                {}
-              );
-            },
-
-              return generateWAMessageFromContent(
-                group.jid,
-                {
-                  groupStatusMessageV2: {
-                    message: { conversation: messageText }
                   }
                 },
                 {}
