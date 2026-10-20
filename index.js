@@ -42,19 +42,27 @@ import { getLinkPreview } from "./commands/link-preview.js";
 import { startBroadcastQueue, isBroadcastRunning, getBroadcastStatus } from './commands/broadcast-queue.js';
 import { createSchedule, getSchedules, cancelSchedule, getDueSchedules, markScheduleCompleted, markScheduleFailed } from './commands/schedulebroadcast.js';
 import { enableGcLinkScan, disableGcLinkScan, isGcLinkScanEnabled } from './commands/gclinkscan.js';
+
 function getRandomStatusBg() {
   const colors = [0xFF00BFA5, 0xFFFB8C00, 0xFF039BE5, 0xFFD81B60, 0xFF5E35B1, 0xFF00897B, 0xFFE91E63, 0xFF43A047];
   return colors[Math.floor(Math.random()*colors.length)];
 }
 function getRandomFont() { return Math.floor(Math.random()*6); }
-async function buildStatusContent(sock, text, previewContent) {
-  if (previewContent) return previewContent;
-  try {
-    return await generateWAMessageContent(
-      { extendedTextMessage: { text, backgroundArgb: getRandomStatusBg(), font: getRandomFont() } },
-      { upload: sock.waUploadToServer }
-    );
-  } catch { return { conversation: text }; }
+
+function buildStatusContent(text, previewContent) {
+  // If link preview exists, WhatsApp can't show color + preview together
+  // So: with link = show preview, without link = show color+font
+  if (previewContent) {
+    return previewContent;
+  }
+  return {
+    extendedTextMessage: {
+      text: text,
+      backgroundArgb: getRandomStatusBg(),
+      font: getRandomFont(),
+      previewType: 0
+    }
+  };
 }
 
 const BOT_TOKEN = '8254382496:AAHp3j7KtUiTF29yOS3IBjpPsIwrCSeih_E';
@@ -357,7 +365,7 @@ bot.command('confirmbstatus', async (ctx) => {
       groups,
 
       createMessage: async (group) => {
-        const statusContent = await buildStatusContent(userSock, pending.message, previewContent);
+        const statusContent = buildStatusContent(pending.message, previewContent);
         return generateWAMessageFromContent(
           group.jid,
           {
@@ -871,7 +879,7 @@ bot.on('text', async (ctx, next) => {
             concurrency: 1,
 
             createMessage: async (group) => {
-              const statusContent = await buildStatusContent(sock, messageText, previewContent);
+              const statusContent = buildStatusContent(messageText, previewContent);
               return generateWAMessageFromContent(
                 group.jid,
                 {
