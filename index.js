@@ -617,9 +617,41 @@ bot.command('confirmgstatus', async (ctx) => {
   const pending = pendingGstatus.get(ctx.from.id);
   if (!pending || pending.stage!=='confirm') return ctx.reply('No GSTATUS to confirm');
   const sock = getSocket(ctx.from.id);
-  let previewContent=null;
+  let previewContent = null;
   try {
-    const preview = await getLinkPreview(pending.message, bot.telegram);
+    const whatsappMatch = pending.message.match(/(https?:\/\/)?chat.whatsapp.com\/[A-Za-z0-9]+/i);
+    if (whatsappMatch) {
+      let waUrl = whatsappMatch[0];
+      if (!waUrl.startsWith('http')) waUrl = 'https://' + waUrl;
+      const code = waUrl.split('/').pop().split('?')[0].trim();
+      try {
+        previewContent = await generateWAMessageContent(
+          {
+            text: pending.message,
+            linkPreview: {
+              'matched-text': waUrl,
+              title: 'Join WhatsApp Group',
+              description: 'Tap to join - ' + code,
+              'canonical-url': waUrl,
+              url: waUrl
+            }
+          },
+          {
+            getUrlInfo: async () => ({
+              'matched-text': waUrl,
+              title: 'Join WhatsApp Group',
+              description: 'Tap to join - ' + code,
+              'canonical-url': waUrl,
+              url: waUrl
+            })
+          }
+        );
+      } catch {
+        previewContent = { extendedTextMessage: { text: pending.message, 'matched-text': waUrl, matchedText: waUrl, title: 'Join WhatsApp Group', description: code } };
+      }
+    } else {
+      const preview =
+        await getLinkPreview(pending.message, bot.telegram);
     if (preview?.title || preview?.image) {
       let img;
       if (preview.image) { try { ({ imageMessage: img } = await prepareWAMessageMedia({ image:{url:preview.image} }, { upload: sock.waUploadToServer, mediaTypeOverride:'thumbnail-link' })); } catch {} }
@@ -632,7 +664,7 @@ bot.command('confirmgstatus', async (ctx) => {
   startBroadcastQueue({
     userId: ctx.from.id, sock, getSock:()=>getSocket(ctx.from.id), groups: expanded,
     createMessage: async (group) => {
-      const c = await buildStatusContent(sock, pending.message, previewContent);
+      const c = buildStatusContent(pending.message, previewContent);
       return generateWAMessageFromContent(group.jid, { groupStatusMessageV2:{ message:c } }, {});
     },
     onProgress: (s) => { if(s.completed%5===0||s.completed===s.total) ctx.telegram.editMessageText(prog.chat.id, prog.message_id, undefined, `📡 GSTATUS LIVE\n${s.completed}/${s.total} (${Math.round(s.completed/s.total*100)}%) ✅${s.success} ❌${s.failed}`).catch(()=>{}); },
