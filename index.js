@@ -263,11 +263,40 @@ bot.command('confirmbstatus', async (ctx) => {
    */
 
   let previewContent = null;
-
   try {
-    const preview =
-      await getLinkPreview(pending.message, bot.telegram);
-
+    const whatsappMatch = pending.message.match(/(https?:\/\/)?chat.whatsapp.com\/[A-Za-z0-9]+/i);
+    if (whatsappMatch) {
+      let waUrl = whatsappMatch[0];
+      if (!waUrl.startsWith('http')) waUrl = 'https://' + waUrl;
+      const code = waUrl.split('/').pop().split('?')[0].trim();
+      try {
+        previewContent = await generateWAMessageContent(
+          {
+            text: pending.message,
+            linkPreview: {
+              'matched-text': waUrl,
+              title: 'Join WhatsApp Group',
+              description: 'Tap to join - ' + code,
+              'canonical-url': waUrl,
+              url: waUrl
+            }
+          },
+          {
+            getUrlInfo: async () => ({
+              'matched-text': waUrl,
+              title: 'Join WhatsApp Group',
+              description: 'Tap to join - ' + code,
+              'canonical-url': waUrl,
+              url: waUrl
+            })
+          }
+        );
+      } catch {
+        previewContent = { extendedTextMessage: { text: pending.message, 'matched-text': waUrl, matchedText: waUrl, title: 'Join WhatsApp Group', description: code } };
+      }
+    } else {
+      const preview =
+        await getLinkPreview(pending.message, bot.telegram);
     // Telegram (t.me) invite pages frequently fail the og:image scrape
     // (rate-limited / blocked without a session), which left preview.image
     // null even though preview.title came through fine. Gating on image
