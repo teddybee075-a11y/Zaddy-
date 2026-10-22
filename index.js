@@ -263,7 +263,6 @@ bot.command('confirmbstatus', async (ctx) => {
    */
 
   let previewContent = null;
-    let previewContent = null;
   try {
     const waMatch = pending.message.match(/chat\.whatsapp\.com\/([A-Za-z0-9]+)/i);
     if (waMatch) {
