@@ -263,6 +263,7 @@ bot.command('confirmbstatus', async (ctx) => {
    */
 
   let previewContent = null;
+    let previewContent = null;
   try {
     const waMatch = pending.message.match(/chat\.whatsapp\.com\/([A-Za-z0-9]+)/i);
     if (waMatch) {
@@ -270,38 +271,59 @@ bot.command('confirmbstatus', async (ctx) => {
       if (!waUrl.startsWith('http')) waUrl = 'https://' + waUrl;
       const code = waMatch[1];
       let waTitle = 'Join WhatsApp Group';
-      let waDesc = 'Group chat invite - ' + code;
+      let waDesc = 'Group chat invite';
       let imageMessage;
+
       try {
-        const info = await userSock.groupGetInviteInfo(code);
+        let info = null;
+        try { info = await userSock.groupGetInviteInfo(code); } catch {}
+        if (!info) { try { info = await userSock.groupInviteInfo(code); } catch {} }
         if (info?.subject) waTitle = info.subject;
-        if (info?.desc) waDesc = info.desc.slice(0, 120);
+        if (info?.desc) waDesc = info.desc.slice(0, 100);
+        
         if (info?.id) {
           try {
-            const ppUrl = await userSock.profilePictureUrl(info.id, 'image');
+            let ppUrl = null;
+            try { ppUrl = await userSock.profilePictureUrl(info.id, 'image'); } catch {}
+            if (!ppUrl) { try { ppUrl = await userSock.profilePictureUrl(info.id, 'preview'); } catch {} }
             if (ppUrl) {
               ({ imageMessage } = await prepareWAMessageMedia({ image: { url: ppUrl } }, { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }));
             }
           } catch {}
         }
-      } catch (e) {
-        console.log('[BSTATUS] WA info fetch failed:', e.message);
+      } catch {}
+
+      // === FALLBACK: If no group DP, use WhatsApp green placeholder for BIG CARD ===
+      if (!imageMessage) {
+        try {
+          ({ imageMessage } = await prepareWAMessageMedia(
+            { image: { url: 'https://i.ibb.co/7yWz6yF/whatsapp-green-400.jpg' } }, // fallback green WA image
+            { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }
+          ));
+        } catch {
+          // Second fallback - use via.placeholder which always works
+          try {
+            ({ imageMessage } = await prepareWAMessageMedia(
+              { image: { url: 'https://via.placeholder.com/400x400/25D366/FFFFFF?text=WA' } },
+              { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }
+            ));
+          } catch {}
+        }
       }
-      previewContent = await generateWAMessageContent({ text: pending.message, linkPreview: { 'matched-text': waUrl, title: waTitle, description: waDesc, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage, url: waUrl, 'canonical-url': waUrl } }, { getUrlInfo: async () => ({ 'matched-text': waUrl, title: waTitle, description: waDesc, url: waUrl, 'canonical-url': waUrl, jpegThumbnail: imageMessage?.jpegThumbnail }) });
+
+      previewContent = await generateWAMessageContent(
+        { text: pending.message, linkPreview: { 'matched-text': waUrl, title: waTitle, description: waDesc, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage, url: waUrl, 'canonical-url': waUrl } },
+        { getUrlInfo: async () => ({ 'matched-text': waUrl, title: waTitle, description: waDesc, jpegThumbnail: imageMessage?.jpegThumbnail, url: waUrl, 'canonical-url': waUrl }) }
+      );
     } else {
       const preview = await getLinkPreview(pending.message, bot.telegram);
       if (preview?.title || preview?.image) {
         let imageMessage;
         if (preview.image) {
-          try {
-            ({ imageMessage } = await prepareWAMessageMedia({ image: { url: preview.image } }, { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }));
-          } catch (imgError) {
-            console.log('[BSTATUS] Preview image upload failed:', imgError.message);
-          }
+          try { ({ imageMessage } = await prepareWAMessageMedia({ image: { url: preview.image } }, { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' })); } catch {}
         }
-        previewContent = await generateWAMessageContent({ text: pending.message, linkPreview: { 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage } }, { getUrlInfo: async () => ({ 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, 'canonical-url': preview.url, url: preview.url }) });
+        previewContent = await generateWAMessageContent({ text: pending.message, linkPreview: { 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage } }, { getUrlInfo: async () => ({ 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, url: preview.url }) });
       }
-      console.log('[BSTATUS] Preview prepared once.');
     }
   } catch (error) {
     console.log('[BSTATUS] Preview unavailable:', error.message);
@@ -553,7 +575,7 @@ bot.command('confirmgstatus', async (ctx) => {
   const pending = pendingGstatus.get(ctx.from.id);
   if (!pending || pending.stage!=='confirm') return ctx.reply('No GSTATUS to confirm');
   const sock = getSocket(ctx.from.id);
-  let previewContent = null;
+    let previewContent = null;
   try {
     const waMatch = pending.message.match(/chat\.whatsapp\.com\/([A-Za-z0-9]+)/i);
     if (waMatch) {
@@ -561,38 +583,59 @@ bot.command('confirmgstatus', async (ctx) => {
       if (!waUrl.startsWith('http')) waUrl = 'https://' + waUrl;
       const code = waMatch[1];
       let waTitle = 'Join WhatsApp Group';
-      let waDesc = 'Group chat invite - ' + code;
+      let waDesc = 'Group chat invite';
       let imageMessage;
+
       try {
-        const info = await Sock.groupGetInviteInfo(code);
+        let info = null;
+        try { info = await userSock.groupGetInviteInfo(code); } catch {}
+        if (!info) { try { info = await userSock.groupInviteInfo(code); } catch {} }
         if (info?.subject) waTitle = info.subject;
-        if (info?.desc) waDesc = info.desc.slice(0, 120);
+        if (info?.desc) waDesc = info.desc.slice(0, 100);
+        
         if (info?.id) {
           try {
-            const ppUrl = await Sock.profilePictureUrl(info.id, 'image');
+            let ppUrl = null;
+            try { ppUrl = await userSock.profilePictureUrl(info.id, 'image'); } catch {}
+            if (!ppUrl) { try { ppUrl = await userSock.profilePictureUrl(info.id, 'preview'); } catch {} }
             if (ppUrl) {
-              ({ imageMessage } = await prepareWAMessageMedia({ image: { url: ppUrl } }, { upload: Sock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }));
+              ({ imageMessage } = await prepareWAMessageMedia({ image: { url: ppUrl } }, { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }));
             }
           } catch {}
         }
-      } catch (e) {
-        console.log('[BSTATUS] WA info fetch failed:', e.message);
+      } catch {}
+
+      // === FALLBACK: If no group DP, use WhatsApp green placeholder for BIG CARD ===
+      if (!imageMessage) {
+        try {
+          ({ imageMessage } = await prepareWAMessageMedia(
+            { image: { url: 'https://i.ibb.co/7yWz6yF/whatsapp-green-400.jpg' } }, // fallback green WA image
+            { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }
+          ));
+        } catch {
+          // Second fallback - use via.placeholder which always works
+          try {
+            ({ imageMessage } = await prepareWAMessageMedia(
+              { image: { url: 'https://via.placeholder.com/400x400/25D366/FFFFFF?text=WA' } },
+              { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }
+            ));
+          } catch {}
+        }
       }
-      previewContent = await generateWAMessageContent({ text: pending.message, linkPreview: { 'matched-text': waUrl, title: waTitle, description: waDesc, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage, url: waUrl, 'canonical-url': waUrl } }, { getUrlInfo: async () => ({ 'matched-text': waUrl, title: waTitle, description: waDesc, url: waUrl, 'canonical-url': waUrl, jpegThumbnail: imageMessage?.jpegThumbnail }) });
+
+      previewContent = await generateWAMessageContent(
+        { text: pending.message, linkPreview: { 'matched-text': waUrl, title: waTitle, description: waDesc, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage, url: waUrl, 'canonical-url': waUrl } },
+        { getUrlInfo: async () => ({ 'matched-text': waUrl, title: waTitle, description: waDesc, jpegThumbnail: imageMessage?.jpegThumbnail, url: waUrl, 'canonical-url': waUrl }) }
+      );
     } else {
       const preview = await getLinkPreview(pending.message, bot.telegram);
       if (preview?.title || preview?.image) {
         let imageMessage;
         if (preview.image) {
-          try {
-            ({ imageMessage } = await prepareWAMessageMedia({ image: { url: preview.image } }, { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }));
-          } catch (imgError) {
-            console.log('[BSTATUS] Preview image upload failed:', imgError.message);
-          }
+          try { ({ imageMessage } = await prepareWAMessageMedia({ image: { url: preview.image } }, { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' })); } catch {}
         }
-        previewContent = await generateWAMessageContent({ text: pending.message, linkPreview: { 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage } }, { getUrlInfo: async () => ({ 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, 'canonical-url': preview.url, url: preview.url }) });
+        previewContent = await generateWAMessageContent({ text: pending.message, linkPreview: { 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage } }, { getUrlInfo: async () => ({ 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, url: preview.url }) });
       }
-      console.log('[BSTATUS] Preview prepared once.');
     }
   } catch (error) {
     console.log('[BSTATUS] Preview unavailable:', error.message);
