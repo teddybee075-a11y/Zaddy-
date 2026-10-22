@@ -264,39 +264,42 @@ bot.command('confirmbstatus', async (ctx) => {
 
   let previewContent = null;
   try {
-    const whatsappMatch = pending.message.match(/(https?:\/\/)?chat\.whatsapp\.com\/[A-Za-z0-9]+/i);
-    if (whatsappMatch) {
-      let waUrl = whatsappMatch[0];
+    const waMatch = pending.message.match(/chat\.whatsapp\.com\/([A-Za-z0-9]+)/i);
+    if (waMatch) {
+      let waUrl = waMatch[0];
       if (!waUrl.startsWith('http')) waUrl = 'https://' + waUrl;
-      const code = waUrl.split('/').pop().split('?')[0].trim();
-      previewContent = {
-        extendedTextMessage: {
-          text: pending.message,
-          matchedText: waUrl,
-          'matched-text': waUrl,
-          title: 'Join WhatsApp Group',
-          description: 'Tap to join - ' + code,
-          previewType: 0
+      const code = waMatch[1];
+      let waTitle = 'Join WhatsApp Group';
+      let waDesc = 'Group chat invite - ' + code;
+      let imageMessage;
+      try {
+        const info = await userSock.groupGetInviteInfo(code);
+        if (info?.subject) waTitle = info.subject;
+        if (info?.desc) waDesc = info.desc.slice(0, 120);
+        if (info?.id) {
+          try {
+            const ppUrl = await userSock.profilePictureUrl(info.id, 'image');
+            if (ppUrl) {
+              ({ imageMessage } = await prepareWAMessageMedia({ image: { url: ppUrl } }, { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }));
+            }
+          } catch {}
         }
-      };
+      } catch (e) {
+        console.log('[BSTATUS] WA info fetch failed:', e.message);
+      }
+      previewContent = await generateWAMessageContent({ text: pending.message, linkPreview: { 'matched-text': waUrl, title: waTitle, description: waDesc, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage, url: waUrl, 'canonical-url': waUrl } }, { getUrlInfo: async () => ({ 'matched-text': waUrl, title: waTitle, description: waDesc, url: waUrl, 'canonical-url': waUrl, jpegThumbnail: imageMessage?.jpegThumbnail }) });
     } else {
       const preview = await getLinkPreview(pending.message, bot.telegram);
       if (preview?.title || preview?.image) {
         let imageMessage;
         if (preview.image) {
           try {
-            ({ imageMessage } = await prepareWAMessageMedia(
-              { image: { url: preview.image } },
-              { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }
-            ));
+            ({ imageMessage } = await prepareWAMessageMedia({ image: { url: preview.image } }, { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }));
           } catch (imgError) {
             console.log('[BSTATUS] Preview image upload failed:', imgError.message);
           }
         }
-        previewContent = await generateWAMessageContent(
-          { text: pending.message, linkPreview: { 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage } },
-          { getUrlInfo: async () => ({ 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, 'canonical-url': preview.url, url: preview.url }) }
-        );
+        previewContent = await generateWAMessageContent({ text: pending.message, linkPreview: { 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage } }, { getUrlInfo: async () => ({ 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, 'canonical-url': preview.url, url: preview.url }) });
       }
       console.log('[BSTATUS] Preview prepared once.');
     }
@@ -552,44 +555,47 @@ bot.command('confirmgstatus', async (ctx) => {
   const sock = getSocket(ctx.from.id);
   let previewContent = null;
   try {
-    const whatsappMatch = pending.message.match(/(https?:\/\/)?chat\.whatsapp\.com\/[A-Za-z0-9]+/i);
-    if (whatsappMatch) {
-      let waUrl = whatsappMatch[0];
+    const waMatch = pending.message.match(/chat\.whatsapp\.com\/([A-Za-z0-9]+)/i);
+    if (waMatch) {
+      let waUrl = waMatch[0];
       if (!waUrl.startsWith('http')) waUrl = 'https://' + waUrl;
-      const code = waUrl.split('/').pop().split('?')[0].trim();
-      previewContent = {
-        extendedTextMessage: {
-          text: pending.message,
-          matchedText: waUrl,
-          'matched-text': waUrl,
-          title: 'Join WhatsApp Group',
-          description: 'Tap to join - ' + code,
-          previewType: 0
+      const code = waMatch[1];
+      let waTitle = 'Join WhatsApp Group';
+      let waDesc = 'Group chat invite - ' + code;
+      let imageMessage;
+      try {
+        const info = await Sock.groupGetInviteInfo(code);
+        if (info?.subject) waTitle = info.subject;
+        if (info?.desc) waDesc = info.desc.slice(0, 120);
+        if (info?.id) {
+          try {
+            const ppUrl = await Sock.profilePictureUrl(info.id, 'image');
+            if (ppUrl) {
+              ({ imageMessage } = await prepareWAMessageMedia({ image: { url: ppUrl } }, { upload: Sock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }));
+            }
+          } catch {}
         }
-      };
+      } catch (e) {
+        console.log('[BSTATUS] WA info fetch failed:', e.message);
+      }
+      previewContent = await generateWAMessageContent({ text: pending.message, linkPreview: { 'matched-text': waUrl, title: waTitle, description: waDesc, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage, url: waUrl, 'canonical-url': waUrl } }, { getUrlInfo: async () => ({ 'matched-text': waUrl, title: waTitle, description: waDesc, url: waUrl, 'canonical-url': waUrl, jpegThumbnail: imageMessage?.jpegThumbnail }) });
     } else {
       const preview = await getLinkPreview(pending.message, bot.telegram);
       if (preview?.title || preview?.image) {
         let imageMessage;
         if (preview.image) {
           try {
-            ({ imageMessage } = await prepareWAMessageMedia(
-              { image: { url: preview.image } },
-              { upload: sock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }
-            ));
+            ({ imageMessage } = await prepareWAMessageMedia({ image: { url: preview.image } }, { upload: userSock.waUploadToServer, mediaTypeOverride: 'thumbnail-link' }));
           } catch (imgError) {
-            console.log('[GSTATUS] Preview image upload failed:', imgError.message);
+            console.log('[BSTATUS] Preview image upload failed:', imgError.message);
           }
         }
-        previewContent = await generateWAMessageContent(
-          { text: pending.message, linkPreview: { 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage } },
-          { getUrlInfo: async () => ({ 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, 'canonical-url': preview.url, url: preview.url }) }
-        );
+        previewContent = await generateWAMessageContent({ text: pending.message, linkPreview: { 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, jpegThumbnail: imageMessage?.jpegThumbnail, highQualityThumbnail: imageMessage } }, { getUrlInfo: async () => ({ 'matched-text': preview.url, title: preview.title || preview.url, description: preview.description, 'canonical-url': preview.url, url: preview.url }) });
       }
-      console.log('[GSTATUS] Preview prepared.');
+      console.log('[BSTATUS] Preview prepared once.');
     }
   } catch (error) {
-    console.log('[GSTATUS] Preview unavailable:', error.message);
+    console.log('[BSTATUS] Preview unavailable:', error.message);
   }
   pendingGstatus.delete(ctx.from.id);
   const prog = await ctx.reply(`📡 GSTATUS RUNNING\nGroups: ${pending.selected.length}\nCount: ${pending.count}x\nTotal: ${pending.selected.length*pending.count}`);
